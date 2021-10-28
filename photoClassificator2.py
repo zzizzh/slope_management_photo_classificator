@@ -8,6 +8,7 @@ import shutil
 import geopandas as gpd
 import threading
 from PIL.ExifTags import TAGS
+from pandas.core.indexes.base import InvalidIndexError
 from shapely.geometry import Point, Polygon
 from tqdm import tqdm
 
@@ -58,34 +59,43 @@ class PhotoClassificator(threading.Thread):
     self.w = widget
     self.valid_data_num=0
 
+
+  def printException(self, error_str):
+    self.w.signal.updateLabel(error_str)
+    self.w.isRunning = False
+
+    return False
+
   def run(self):
     self.classificate()
 
   # 분류
   def classificate(self):
     
-    print("reading SHP file...")
-    self.w.signal.updateLabel("(1/7) reading SHP file...")
-    self.read_gis_files(self.gis_path)
-    print("reading img file...")
-    self.w.signal.updateLabel("(2/7) reading img file...")
-    img_count = self.count_img_files(self.root_path)
-    self.progress_bar = tqdm(total=img_count, unit=" 파일 수")
-    self.read_img_files(self.root_path)
-    self.progress_bar.close()
-    print("create img data set...")
-    self.make_data_set()
-    print("create class dir...")
-    self.make_class_dir()
-    print("classficate by area...")
-    self.classificate_by_area()
-    print("copy img file...")
-    self.copyValidFile()
+    print("SHP파일 읽는 중...")
+    if self.read_gis_files(self.gis_path):
+      return
 
+    print("이미지파일 읽는 중...")
+    img_count = self.count_img_files(self.root_path)
+    print("이미지 데이터셋 생성...")
+    self.make_data_set()
+    print("분류폴더 생성...")
+    self.make_class_dir()
+    print("영역별 이미지 분류...")
+    self.classificate_by_area()
+    print("분류 이미지 복사...")
+    self.copyValidFile()
+    print("미분류 이미지 복사...")
+    self.copyInvalidFile()
+    self.w.signal.updateLabel("분류 작업 끝.")
+    self.w.signal.initPb(0, 100)
     print(" ")  
     print("===================================================================================")
     print("분류 작업 끝. 프로그램 종료.")
     print("===================================================================================")
+
+    self.w.isRunning = False
 
     if self.w.finish:
       sys.exit()
@@ -94,55 +104,87 @@ class PhotoClassificator(threading.Thread):
 
 
   # SHP/DBF파일이 포함된 폴더의 경로명으로 폴리곤 ID,폴리곤 쌍 저장
+  # 오류나면 False 리턴
   def read_SHP(self, shp_path):
 
-    geoms = gpd.read_file(shp_path, encoding='utf-8')
+    self.w.signal.initPb(0, 0)
+    try:
+      geoms = gpd.read_file(shp_path, encoding='utf-8')
 
-    for area_id, polygon in zip(geoms.Name, geoms.geometry):
-      if type(area_id) == type(b'0'):
-        area_id=str(area_id)
-      print("area_id : " + area_id)
-      area_path = os.path.join(self.w.save, area_id)
-      self.areas.append(Area(polygon, area_id, area_path))
+      with geoms:
+        for area_id, polygon in zip(geoms.Name, geoms.geometry):
+          if type(area_id) == type(b'0'):
+            area_id=str(area_id)
+          print("area_id : " + area_id)
+          area_path = os.path.join(self.w.save, area_id)
+          self.areas.append(Area(polygon, area_id, area_path))
 
-    return
+    except FileNotFoundError:
+      return self.printException("에러 : 해당 폴더("+shp_path+")에 SHP 파일 셋을 찾을 수 없습니다.")
+
+    except NotADirectoryError :
+      return self.printException("에러 : 해당 경로("+shp_path+")가 디렉토리가 아닙니다.")
+
+    except AttributeError:
+      return self.printException("에러 : \"Name\" 필드가 SHP 내에 존재하지 않습니다.")
+
+    return True
 
         
   # SHP/DBF파일이 포함된 폴더를 선택해서 해당 SHP파일의
   # 경로, 파일명을 얻음
   def read_gis_files(self, gis_dir):
-    cur_file_list = os.listdir(gis_dir)
+    self.w.signal.updateLabel("(1/6) 구역정보 읽는 중...")
 
-    for file_name in cur_file_list:
-      if os.path.isdir(os.path.join(gis_dir, file_name)):
-        continue
-      else:
-        root, file_ext = os.path.splitext(os.path.join(gis_dir, file_name))
-        for ext in [".shp", ".SHP"]:
-          if file_ext == ext:
-            shp_path = os.path.join(gis_dir, file_name)
-            self.read_SHP(shp_path)
-            return
+    try:
+      cur_file_list = os.listdir(gis_dir)
+
+      for file_name in cur_file_list:
+        if os.path.isdir(os.path.join(gis_dir, file_name)):
+          continue
+        else:
+          root, file_ext = os.path.splitext(os.path.join(gis_dir, file_name))
+          for ext in [".shp", ".SHP"]:
+            if file_ext == ext:
+              shp_path = os.path.join(gis_dir, file_name)
+              
+              return self.read_SHP(shp_path)
       
+    except FileNotFoundError:
+      return self.printException("에러 : 해당 경로("+gis_dir+")를 찾을 수 없습니다.")
     
-    sys.exit("[에러] SHP 파일 셋을 찾을 수 없습니다.")     
-
+    except NotADirectoryError :
+      return self.printException("에러 : 해당 경로("+gis_dir+")가 디렉토리가 아닙니다.")
 
   # 지정된 폴더 내 하위 폴더까지 모든 이미지 파일의 경로명을
   # file_paths 리스트에 저장
   def count_img_files(self, start_dir):
+
+    self.w.signal.initPb(0, 0)
+    self.w.signal.updateLabel("(2/6) 영상정보 읽는 중...")
+
     count = 0
+    try:
+      cur_file_list = os.listdir(start_dir)
 
-    cur_file_list = os.listdir(start_dir)
+      for file_name in cur_file_list:
+        if os.path.isdir(os.path.join(start_dir, file_name)):
+          count = count + self.count_img_files(os.path.join(start_dir, file_name))
+        else:
+          root, file_ext = os.path.splitext(os.path.join(start_dir, file_name))
+          for ext in [".png", ".jpg", ".JPG", ".PNG"]:
+            if file_ext == ext:
+              count = count + 1
+              self.ext = ext
+              self.file_paths.append(os.path.join(start_dir, file_name))
 
-    for file_name in cur_file_list:
-      if os.path.isdir(os.path.join(start_dir, file_name)):
-        count = count + self.count_img_files(os.path.join(start_dir, file_name))
-      else:
-        root, file_ext = os.path.splitext(os.path.join(start_dir, file_name))
-        for ext in [".png", ".jpg", ".JPG", ".PNG"]:
-          if file_ext == ext:
-            count = count + 1
+    except FileNotFoundError :
+      self.printException("에러 : 해당 경로("+start_dir+")를 찾을 수 없습니다.")
+      return -1
+
+    except NotADirectoryError :
+      self.printException("에러 : 해당 경로("+start_dir+")가 디렉토리가 아닙니다.")
+      return -1
 
     return count
 
@@ -150,21 +192,26 @@ class PhotoClassificator(threading.Thread):
   # 이미지 파일을 읽어서 리스트에 저장
   def read_img_files(self, start_dir):
 
-    cur_file_list = os.listdir(start_dir)
-    for file_name in cur_file_list:
-      if os.path.isdir(os.path.join(start_dir, file_name)):
-        self.read_img_files(os.path.join(start_dir, file_name))
+    try:
+      cur_file_list = os.listdir(start_dir)
+      for file_name in cur_file_list:
+        if os.path.isdir(os.path.join(start_dir, file_name)):
+          self.read_img_files(os.path.join(start_dir, file_name))
 
-      else:
-        root, file_ext = os.path.splitext(os.path.join(start_dir, file_name))
-        for ext in [".png", ".jpg", ".JPG", ".PNG"]:
-          if file_ext == ext:
+        else:
+          root, file_ext = os.path.splitext(os.path.join(start_dir, file_name))
+          for ext in [".png", ".jpg", ".JPG", ".PNG"]:
+            if file_ext == ext:
 
-            self.ext = ext
-            self.file_paths.append(os.path.join(start_dir, file_name))
-            self.progress_bar.update(1)
+              self.ext = ext
+              self.file_paths.append(os.path.join(start_dir, file_name))
+              self.progress_bar.update(1)
 
-    return
+    except FileNotFoundError:
+      self.printException("에러 : 해당 경로("+start_dir+")를 찾을 수 없습니다.")
+    except NotADirectoryError:
+      self.printException("에러 : 해당 경로("+start_dir+")가 디렉토리가 아닙니다.")
+    return 
   
 
   # SHP영역에 해당하는 사진 유무 판단 후 에러 출력, 프로그램 종료
@@ -186,8 +233,12 @@ class PhotoClassificator(threading.Thread):
       area_dir_name = os.path.join(dir, area.area_id)
       if os.path.exists(area_dir_name)==False:
         os.mkdir(area_dir_name)
+    
+    invalid_dir_name = os.path.join(dir, "미분류")
+    if os.path.exists(invalid_dir_name)==False:
+        os.mkdir(invalid_dir_name)
 
-    return
+    return True
 
 
 
@@ -199,7 +250,7 @@ class PhotoClassificator(threading.Thread):
     self.w.signal.initPb(0, len(self.file_paths)-1)
     for file_path, index in zip(self.file_paths, range(0, len(self.file_paths))):
       
-      self.w.signal.updateLabel("(3/7) 이미지 데이터 추출 중...[전체 파일 수 : " + str(index+1) + "/" + str(len(self.file_paths)) + "]")
+      self.w.signal.updateLabel("(3/6) 위치정보 추출 중...[전체 파일 수 : " + str(index+1) + "/" + str(len(self.file_paths)) + "]")
       index=index+1
       #file_name = os.path.basename(file_path)
       
@@ -243,7 +294,7 @@ class PhotoClassificator(threading.Thread):
     self.w.signal.initPb(0, len(self.datas)-1)
 
     for data in self.datas:
-      self.w.signal.updateLabel("(4/7) 이미지 영역 분류 작업 중...[전체 파일 수 : " + str(index+1) + "/" + str(len(self.datas)) + "]")
+      self.w.signal.updateLabel("(4/6) 영상분류 작업 중...[전체 파일 수 : " + str(index+1) + "/" + str(len(self.datas)) + "]")
 
       for area in self.areas:
         if data.point.within(area.polygon):
@@ -274,15 +325,14 @@ class PhotoClassificator(threading.Thread):
       data_num=1
 
       for data in area.datas:
-        self.w.signal.updateLabel("(6/7) 분류 이미지 복사 중... [폴더 이름:" + area.area_id + "][파일 수 : " + str(data_num) 
+        self.w.signal.updateLabel("(5/6) 분류영상 복사 중... [폴더 이름:" + area.area_id + "][파일 수 : " + str(data_num) 
                 + "/" + str(len(area.datas))+"][전체 분류 파일 수 : " + str(valid_data_) + "/" + str(self.valid_data_num)+"]")
         valid_data_=valid_data_+1
-        data_num=data_num+1
         date_dir = os.path.join(area.area_dir_path, data.date)
         if os.path.exists(date_dir) == False:
           os.mkdir(date_dir)
 
-        new_file_name = os.path.join(date_dir, os.path.basename(data.file_path)+self.ext)
+        new_file_name = os.path.join(date_dir, str(data_num).zfill(4)+self.ext)
         data.set_new_file_name(new_file_name)
 
         if os.path.exists(new_file_name)==False:
@@ -290,8 +340,16 @@ class PhotoClassificator(threading.Thread):
 
           pbValue=self.w.pb.value()
           self.w.signal.updatePb(pbValue+1)
-          self.datas.remove(data)
+          
+          try:
+            self.datas.remove(data)
+          # 중복 영역에 포함되어 이미 삭제된 경우 
+          except ValueError:
+            pass
+          
           pbar.update(1)
+        
+        data_num=data_num+1
         
       pbar.close()
     
@@ -299,38 +357,33 @@ class PhotoClassificator(threading.Thread):
 
   # 영역안에 포함되는 이미지 파일 해당영역/날짜 폴더에 복사
   def copyInvalidFile(self):
-    invalid_data = 0
     
-    self.w.signal.initPb(0, self.valid_data_num-1)
+    self.w.signal.initPb(0, len(self.datas))
 
-    for area in self.areas:
-      if len(area.datas) == 0:
-        continue
-
-      pbar = tqdm(total=len(area.datas), unit=" 파일 수", desc="[area_id:" + area.area_id + "]")
+    pbar = tqdm(total=len(self.datas), unit=" 파일 수")
       
-      data_num=1
+    data_num=1
 
-      for data in self.datas:
-        self.w.signal.updateLabel("(7/7) 미분류 이미지 복사 중... [폴더 이름: 미분류폴더 ][파일 수 : " + str(data_num) 
-                + "/" + str(len(self.datas))+"]")
-        invalid_data=invalid_data+1
-        data_num=data_num+1
-        date_dir = os.path.join(area.area_dir_path, data.date)
-        if os.path.exists(date_dir) == False:
-          os.mkdir(date_dir)
+    for data in self.datas:
+      self.w.signal.updateLabel("(6/6) 미분류영상 복사 중... [폴더 이름: 미분류폴더 ][파일 수 : " + str(data_num) 
+              + "/" + str(len(self.datas))+"]")
+      date_dir = os.path.join(self.w.save, "미분류", data.date)
+      if os.path.exists(date_dir) == False:
+        os.mkdir(date_dir)
 
-        new_file_name = os.path.join(date_dir, "_"+invalid_data+self.ext)
-        data.set_new_file_name(new_file_name)
+      new_file_name = os.path.join(date_dir, str(data_num).zfill(4)+self.ext)
+      data.set_new_file_name(new_file_name)
 
-        if os.path.exists(new_file_name)==False:
-          shutil.copy2(data.file_path, new_file_name)
+      if os.path.exists(new_file_name)==False:
+        shutil.copy2(data.file_path, new_file_name)
 
-          pbValue=self.w.pb.value()
-          self.w.signal.updatePb(pbValue+1)
-          pbar.update(1)
-        
-      pbar.close()
+        pbValue=self.w.pb.value()
+        self.w.signal.updatePb(pbValue+1)
+        pbar.update(1)
+      
+      data_num=data_num+1
+
+    pbar.close()
     
     return
 
