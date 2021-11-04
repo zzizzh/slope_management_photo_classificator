@@ -4,7 +4,7 @@ block_cipher = None
 
 
 a = Analysis(['photoClassificator2.py'],
-             pathex=['C:\\Users\\jeami\\source\\repos\\photoClassificator2'],
+             pathex=['C:\\Users\\user\\workspace\\fmsurvey\\slope_management_photo_classificator'],
              binaries=[],
              datas=[],
              hiddenimports=[],

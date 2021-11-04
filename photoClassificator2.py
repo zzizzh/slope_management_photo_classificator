@@ -1,4 +1,5 @@
 import sys
+from PyQt5.QtGui import QCloseEvent
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5 import uic
@@ -48,6 +49,7 @@ class PhotoClassificator(threading.Thread):
 
   def __init__(self, root_path, gis_path, widget):
     super().__init__()
+    self.daemon=True
     self.root_path = root_path
     self.ext = None
     self.classificate_path = None
@@ -73,11 +75,15 @@ class PhotoClassificator(threading.Thread):
   def classificate(self):
     
     print("SHP파일 읽는 중...")
-    if self.read_gis_files(self.gis_path):
+    if self.read_gis_files(self.gis_path) == False:
+      self.printException("해당 경로에 SHP파일이 존재하지 않습니다.")
       return
 
     print("이미지파일 읽는 중...")
     img_count = self.count_img_files(self.root_path)
+    if img_count == 0:
+      self.printException("해당 폴더 내 이미지 파일이 존재하지 않습니다.")
+
     print("이미지 데이터셋 생성...")
     self.make_data_set()
     print("분류폴더 생성...")
@@ -97,10 +103,13 @@ class PhotoClassificator(threading.Thread):
 
     self.w.isRunning = False
 
+    self.w.check()
+
     if self.w.finish:
       sys.exit()
 
-    return
+    return False
+
 
 
   # SHP/DBF파일이 포함된 폴더의 경로명으로 폴리곤 ID,폴리곤 쌍 저장
@@ -108,25 +117,25 @@ class PhotoClassificator(threading.Thread):
   def read_SHP(self, shp_path):
 
     self.w.signal.initPb(0, 0)
-    try:
-      geoms = gpd.read_file(shp_path, encoding='utf-8')
+    # try:
+    geoms = gpd.read_file(shp_path, encoding='utf-8')
 
-      with geoms:
-        for area_id, polygon in zip(geoms.Name, geoms.geometry):
-          if type(area_id) == type(b'0'):
-            area_id=str(area_id)
-          print("area_id : " + area_id)
-          area_path = os.path.join(self.w.save, area_id)
-          self.areas.append(Area(polygon, area_id, area_path))
+      # with geoms:
+    for area_id, polygon in zip(geoms.Name, geoms.geometry):
+      if type(area_id) == type(b'0'):
+        area_id=str(area_id)
+      print("area_id : " + area_id)
+      area_path = os.path.join(self.w.save, area_id)
+      self.areas.append(Area(polygon, area_id, area_path))
 
-    except FileNotFoundError:
-      return self.printException("에러 : 해당 폴더("+shp_path+")에 SHP 파일 셋을 찾을 수 없습니다.")
+    # except FileNotFoundError:
+    #   return self.printException("에러 : 해당 폴더("+shp_path+")에 SHP 파일 셋을 찾을 수 없습니다.")
 
-    except NotADirectoryError :
-      return self.printException("에러 : 해당 경로("+shp_path+")가 디렉토리가 아닙니다.")
+    # except NotADirectoryError :
+    #   return self.printException("에러 : 해당 경로("+shp_path+")가 디렉토리가 아닙니다.")
 
-    except AttributeError:
-      return self.printException("에러 : \"Name\" 필드가 SHP 내에 존재하지 않습니다.")
+    # except AttributeError:
+    #   return self.printException("에러 : \"Name\" 필드가 SHP 내에 존재하지 않습니다.")
 
     return True
 
@@ -136,25 +145,21 @@ class PhotoClassificator(threading.Thread):
   def read_gis_files(self, gis_dir):
     self.w.signal.updateLabel("(1/6) 구역정보 읽는 중...")
 
-    try:
-      cur_file_list = os.listdir(gis_dir)
+    cur_file_list = os.listdir(gis_dir)
 
-      for file_name in cur_file_list:
-        if os.path.isdir(os.path.join(gis_dir, file_name)):
-          continue
-        else:
-          root, file_ext = os.path.splitext(os.path.join(gis_dir, file_name))
-          for ext in [".shp", ".SHP"]:
-            if file_ext == ext:
-              shp_path = os.path.join(gis_dir, file_name)
-              
-              return self.read_SHP(shp_path)
-      
-    except FileNotFoundError:
-      return self.printException("에러 : 해당 경로("+gis_dir+")를 찾을 수 없습니다.")
+    for file_name in cur_file_list:
+      if os.path.isdir(os.path.join(gis_dir, file_name)):
+        continue
+      else:
+        root, file_ext = os.path.splitext(os.path.join(gis_dir, file_name))
+        for ext in [".shp", ".SHP"]:
+          if file_ext == ext:
+            shp_path = os.path.join(gis_dir, file_name)
+            
+            return self.read_SHP(shp_path)
     
-    except NotADirectoryError :
-      return self.printException("에러 : 해당 경로("+gis_dir+")가 디렉토리가 아닙니다.")
+
+    return False
 
   # 지정된 폴더 내 하위 폴더까지 모든 이미지 파일의 경로명을
   # file_paths 리스트에 저장
@@ -414,6 +419,9 @@ class WindowClass(QMainWindow, form_class) :
   def __init__(self) :
     super().__init__()
 
+    f = open("./SHPPath.conf", 'r', encoding='utf-8')
+    lines = f.readlines()
+
     self.signal = PbSignal()
     self.signal.sigUpdatePb.connect(self.updatePb)
     self.signal.sigInitPb.connect(self.initPb)
@@ -425,10 +433,10 @@ class WindowClass(QMainWindow, form_class) :
 
     self.setupUi(self)
 
-    self.SHPPath.setText("E:/항공사진/SHP_UTF8")
-    self.imgPath.setText("E:/항공사진/원본영상")
-    self.savePath.setText("E:/항공사진/분류폴더")
-    self.save="E:/항공사진/분류폴더"
+    if len(lines) > 2:
+      self.SHPPath.setText(lines[0][:lines[0].index('\n')])
+      self.imgPath.setText(lines[1][:lines[1].index('\n')])
+      self.savePath.setText(lines[2][:lines[2].index('\n')])
     self.findSHPPathBtn.clicked.connect(self.findSHPPath)
     self.findImgPathBtn.clicked.connect(self.findImgPath)
     self.findSavePathBtn.clicked.connect(self.findSavePath)
@@ -442,6 +450,16 @@ class WindowClass(QMainWindow, form_class) :
     self.p = None
 
     self.pb.valueChanged.connect(self.printPercent)
+
+  def closeEvent(self, event:QCloseEvent):
+    self.close()
+
+  def savePathConf(self):
+    f = open("./SHPPath.conf", 'w', encoding='utf-8')
+    self.save = self.savePath.text()
+    f.write(self.SHPPath.text()+'\n')
+    f.write(self.imgPath.text()+'\n')
+    f.write(self.savePath.text()+'\n')
 
   def check(self):
     if self.checkBox.isChecked():
@@ -490,18 +508,14 @@ class WindowClass(QMainWindow, form_class) :
   def execute(self) :
     if self.isRunning==False:
       self.isRunning=True
+      self.savePathConf()
       self.p = PhotoClassificator(self.imgPath.text(), self.SHPPath.text(), self)
       self.p.start()
 
-
-# set conf
-#f = open("SHPPath.conf", 'r')
-#lines = f.readlines()
-SHP = "test"
-#f.close()
+      if self.finish:
+        self.close()
 
 if __name__ == "__main__" :
-
 
     #QApplication : 프로그램을 실행시켜주는 클래스
     app = QApplication(sys.argv) 
@@ -513,4 +527,4 @@ if __name__ == "__main__" :
     myWindow.show()
 
     #프로그램을 이벤트루프로 진입시키는(프로그램을 작동시키는) 코드
-    app.exec_()
+    sys.exit(app.exec_())
